@@ -16,16 +16,21 @@ os.environ["SteamAppId"] = os.environ["SteamGameId"] = APPID      # pretend to b
 def find_lib():
     if len(sys.argv) > 2:
         return sys.argv[2]
-    roots = [Path.home() / ".local/share/Steam", Path.home() / ".steam/steam",
-             Path.home() / ".var/app/com.valvesoftware.Steam/.local/share/Steam"]
+    roots = [Path.home() / ".local/share/Steam", Path.home() / ".var/app/com.valvesoftware.Steam/.local/share/Steam"]
     for r in roots:
-        for pat in ("steamapps/common/*/**/libsteam_api.so", "**/libsteam_api.so"):
-            for f in glob.glob(str(r / pat), recursive=True):
-                return f
+        common = r / "steamapps" / "common"
+        if not common.is_dir():
+            continue
+        print("searching", common, flush=True)
+        for game in sorted(common.iterdir()):          # shallow: only a few levels inside each game, no symlink walking
+            for sub in ("", "bin", "lib", "lib64", "linux64", "bin/linux64"):
+                f = game / sub / "libsteam_api.so"
+                if f.is_file():
+                    return str(f)
     return None
 
 lib_path = find_lib()
-print("libsteam_api:", lib_path)
+print("libsteam_api:", lib_path, flush=True)
 if not lib_path:
     sys.exit("No libsteam_api.so found. Pass one as the 2nd argument (copy it from any native Linux Steam game).")
 lib = ctypes.CDLL(lib_path)
