@@ -3,6 +3,7 @@
 wallpaper-workshop - helper for the "Workshop" tab added to Plasma's Wallpaper Engine settings.
 
   search JSON      search/browse the Steam Workshop (JSON on stdout)
+  open ID          open the item in the Steam client (you click Subscribe there)
   subscribe ID     subscribe to a Workshop item with the saved Steam login
   installed LIB    {id: source} of Workshop wallpapers already downloaded
   status           {"logged_in": bool}
@@ -259,6 +260,22 @@ def cmd_subscribe(wid):
     return {"ok": False, "error": "Steam said no: " + text[:160], "need_login": "login" in text.lower()}
 
 
+def cmd_open(wid):
+    """Option 1: open the item in the running Steam client (already signed in); the user clicks Subscribe there."""
+    import shutil, subprocess
+    if not re.fullmatch(r"\d+", wid or ""):
+        return {"ok": False, "error": "bad id"}
+    url = f"steam://url/CommunityFilePage/{wid}"
+    for cmd in (["steam", url], ["xdg-open", url], ["flatpak", "run", "com.valvesoftware.Steam", url]):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                return {"ok": True, "error": ""}
+            except Exception as e:
+                last = str(e)
+    return {"ok": False, "error": "couldn't launch Steam (is it installed?)"}
+
+
 def cmd_login():
     try:
         from PyQt6.QtCore import QUrl
@@ -315,6 +332,8 @@ def main(argv):
         out = cmd_search(argv[2])
     elif cmd == "subscribe" and len(argv) > 2:
         out = cmd_subscribe(argv[2])
+    elif cmd == "open" and len(argv) > 2:
+        out = cmd_open(argv[2])
     elif cmd == "installed":
         out = {"installed": installed_map(argv[2] if len(argv) > 2 else "")}
     elif cmd == "status":

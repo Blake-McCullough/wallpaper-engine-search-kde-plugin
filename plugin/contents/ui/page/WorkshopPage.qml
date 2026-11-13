@@ -110,7 +110,7 @@ Item {
             if (results.get(i).wid === wid) { for (const k in props) results.setProperty(i, k, props[k]); }
     }
     function subscribe(wid) {
-        if (!loggedIn) { login(); return; }
+        if (!loggedIn) { openInSteam(wid); return; }
         setRow(wid, { state: "subscribing" });
         run("subscribe " + shq(wid), res => {
             if (res.ok) {
@@ -119,9 +119,19 @@ Item {
                 message = "Subscribed. Steam will download it (Steam must be running); it then appears here and in Wallpapers.";
             } else {
                 setRow(wid, { state: "" });
-                if (res.need_login) { loggedIn = false; message = "Steam sign-in expired — sign in again."; }
+                if (res.need_login) { loggedIn = false; message = "Steam sign-in expired — using the Steam client instead."; openInSteam(wid); }
                 else message = "Couldn't subscribe: " + res.error;
             }
+        });
+    }
+    // Opens the item in the (already signed-in) Steam client; subscribing there is picked up automatically.
+    function openInSteam(wid) {
+        run("open " + shq(wid), res => {
+            if (res.ok) {
+                pending[wid] = true; pendingCount = Object.keys(pending).length;
+                setRow(wid, { state: "waiting" });
+                message = "Click Subscribe on the page that just opened in Steam. It will show up here when it has downloaded.";
+            } else message = "Couldn't open Steam: " + res.error;
         });
     }
     function checkPending() {
@@ -247,13 +257,15 @@ Item {
                         }
                         Button {
                             Layout.fillWidth: true
-                            enabled: state === "" || state === "installed"
+                            enabled: state === "" || state === "installed" || state === "waiting"
                             text: state === "installed" ? (wid === page.currentId ? "In use" : "Use as wallpaper")
                                 : state === "subscribing" ? "Subscribing…"
+                                : state === "waiting" ? "Waiting for you in Steam…"
                                 : state === "downloading" ? "Downloading in Steam…" : "Subscribe"
                             highlighted: state === ""
                             onClicked: {
                                 if (state === "installed") page.useWallpaper(wid, source);
+                                else if (state === "waiting") page.openInSteam(wid);
                                 else page.subscribe(wid);
                             }
                         }
@@ -274,9 +286,9 @@ Item {
                 onClicked: { page.pageNo++; page.search(false); }
             }
             Item { Layout.fillWidth: true }
-            Label { text: page.loggedIn ? "Signed in to Steam" : "Not signed in"; opacity: 0.7 }
+            Label { text: page.loggedIn ? "One-click subscribe on" : "Subscribe opens Steam"; opacity: 0.7 }
             Button {
-                text: page.loggedIn ? "Sign out" : "Sign in to subscribe"
+                text: page.loggedIn ? "Sign out" : "Optional: sign in for one-click"
                 onClicked: page.loggedIn ? page.logout() : page.login()
             }
         }

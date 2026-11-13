@@ -14,7 +14,9 @@ Re-run `install.sh` after the upstream plugin updates (it keeps a patched user c
 
 ## How it works
 - `wallpaper-workshop` (Python helper in `~/.local/bin`) scrapes the Workshop and talks to Steam; the QML tab calls it.
-- Subscribing needs a one-time Steam sign-in window (only the login cookie is stored, `~/.local/share/wallpaper-workshop`, mode 600). Steam must be running to download.
+- **Subscribe** opens the item in your Steam client (already signed in); click Subscribe there. The tab notices when Steam has downloaded it and offers "Use as wallpaper".
+- Optional one-click mode: "Sign in for one-click" opens a Steam login window once (only the login cookie is stored in `~/.local/share/wallpaper-workshop`, mode 600). Needs `python-pyqt6-webengine`.
+- **Experiment:** `experiments/steamworks_subscribe.py ID` tries subscribing through the running Steam client via the Steamworks API (what Wallpaper Engine does), with no login. Run it and send the output; if it works it becomes the default.
 - Optional: Steam Web API key support exists in the helper query (`api_key`).
 
 ## Tests
