@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""
+wallpaper-workshop - helper for the "Workshop" tab added to Plasma's Wallpaper Engine settings.
+
+  search JSON      search/browse the Steam Workshop (JSON on stdout)
+  subscribe ID     subscribe to a Workshop item with the saved Steam login
+  installed LIB    {id: source} of Workshop wallpapers already downloaded
+  status           {"logged_in": bool}
+  login            open a Steam sign-in window (needs python-pyqt6-webengine)
+  logout           forget the saved login
+Every command prints a single JSON object.
+"""
+import base64, html as htmllib, json, os, re, sys, urllib.error, urllib.parse, urllib.request
+from pathlib import Path
+
+__version__ = "1.0.0"
+WE_APPID = "431960"
+APP = "wallpaper-workshop"
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / APP
+COOKIES = DATA_DIR / "cookies.json"
+UA = f"Mozilla/5.0 (X11; Linux x86_64) WallpaperWorkshop/{__version__}"
+PER_PAGE = 30
+API_QUERY_TYPE = {"trend": 3, "totaluniquesubscribers": 9, "mostrecent": 1, "lastupdated": 21}
+API_TEXT_SEARCH = 12
+
+
+def http_get(url, timeout=20):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def query_tags(q):
+    return [t for t in q.get("include", []) if t]
+
+
+def query_excluded(q):
+    return [t for t in q.get("exclude", []) if t]
+
+
+def scrape_url(q):
+    text = q.get("text", "").strip()
+    sort = "textsearch" if text else q.get("sort", "trend")
+    params = [("appid", WE_APPID), ("searchtext", text), ("childpublishedfileid", "0"),
+              ("browsesort", sort), ("section", "readytouseitems")]
+    for t in query_tags(q):
+        params.append(("requiredtags[]", t))
+    for t in query_excluded(q):
+        params.append(("excludedtags[]", t))
+    params += [("actualsort", sort), ("p", str(q.get("page", 1)))]
+    if sort == "trend":
+        params.append(("days", str(q.get("days", 7))))
+    return "https://steamcommunity.com/workshop/browse/?" + urllib.parse.urlencode(params)
+
+
+def api_url(q, key):
+    text = q.get("text", "").strip()
+    sort = q.get("sort", "trend")
+    params = [("key", key), ("appid", WE_APPID), ("creator_appid", WE_APPID),
+              ("page", str(q.get("page", 1))), ("numperpage", str(PER_PAGE)),
+              ("query_type", str(API_TEXT_SEARCH if text else API_QUERY_TYPE.get(sort, 3))),
+              ("search_text", text), ("match_all_tags", "true"), ("return_tags", "true"),
+              ("return_short_description", "true"), ("return_vote_data", "true"), ("filetype", "0")]
+    if sort == "trend" and not text:
+        d = int(q.get("days", 7))
+        params.append(("days", str(d if d > 0 else 3650)))
+    for i, t in enumerate(query_tags(q)):
+        params.append((f"requiredtags[{i}]", t))
+    for i, t in enumerate(query_excluded(q)):
+        params.append((f"excludedtags[{i}]", t))
+    return "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/?" + urllib.parse.urlencode(params)
+
+
+def _clean(text, limit=700):
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = re.sub(r"\[/?[a-zA-Z0-9*=#\" ]+\]", " ", text)       # BBCode
+    text = htmllib.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def parse_api(raw):
+    r = json.loads(raw).get("response", {})
+    items = []
+    for f in r.get("publishedfiledetails", []) or []:
+        if str(f.get("result", 1)) not in ("1",) and "title" not in f:
+            continue
+        tags = [t.get("display_name") or t.get("tag", "") for t in f.get("tags", []) or []]
+        items.append({
+            "id": str(f.get("publishedfileid", "")),
+            "title": f.get("title") or str(f.get("publishedfileid", "")),
+            "author": "",
+            "preview_url": f.get("preview_url", ""),
+            "desc": _clean(f.get("short_description") or f.get("file_description", "")),
+            "subs": int(f.get("subscriptions", 0) or 0),
+            "tags": [t for t in tags if t],
+        })
+    return [i for i in items if i["id"]], int(r.get("total", len(items)) or 0)
+
+
+def parse_workshop_html(page):
+    """Parse a steamcommunity.com workshop browse page. Tolerant: several strategies are merged."""
+    items, order = {}, []
+
+    def entry(i):
+        if i not in items:
+            items[i] = {"id": i, "title": "", "author": "", "preview_url": "", "desc": "", "subs": 0, "tags": []}
+            order.append(i)
+        return items[i]
+
+    # 1) hover-tooltip JSON that Steam embeds for each item (title + description)
+    dec = json.JSONDecoder()
+    for m in re.finditer(r'SharedFileBindMouseHover\(\s*"sharedfile_(\d+)"\s*,\s*(?:true|false)\s*,\s*', page):
+        try:
+            obj, _ = dec.raw_decode(page, m.end())
+        except Exception:
+            continue
+        e = entry(m.group(1))
+        if isinstance(obj, dict):
+            e["title"] = e["title"] or htmllib.unescape(str(obj.get("title", "")))
+            e["desc"] = e["desc"] or _clean(str(obj.get("description", "")))
+
+    # 2) the item blocks themselves
+    for block in re.split(r'<div[^>]+class="[^"]*\bworkshopItem\b[^"]*"', page)[1:]:
+        m = re.search(r'data-publishedfileid="(\d+)"', block) or re.search(r"filedetails/\?id=(\d+)", block)
+        if not m:
+            continue
+        e = entry(m.group(1))
+        img = re.search(r'<img[^>]+class="[^"]*workshopItemPreviewImage[^"]*"[^>]+src="([^"]+)"', block) \
+            or re.search(r'<img[^>]+src="(https?://[^"]+)"', block)
+        if img and not e["preview_url"]:
+            e["preview_url"] = htmllib.unescape(img.group(1))
+        t = re.search(r'class="[^"]*workshopItemTitle[^"]*"[^>]*>(.*?)</div>', block, re.S)
+        if t and not e["title"]:
+            e["title"] = _clean(t.group(1), 200)
+        a = re.search(r'class="[^"]*workshopItemAuthorName[^"]*"[^>]*>(.*?)</div>', block, re.S)
+        if a:
+            e["author"] = re.sub(r"^\s*by\s*", "", _clean(a.group(1), 80), flags=re.I)
+
+    # 3) fallback: bare anchors to item pages
+    for m in re.finditer(r'<a[^>]+href="[^"]*filedetails/\?id=(\d+)[^"]*"[^>]*>(.*?)</a>', page, re.S):
+        inner = m.group(2)
+        img = re.search(r'<img[^>]+src="(https?://[^"]+)"', inner)
+        alt = re.search(r'<img[^>]+alt="([^"]*)"', inner)
+        if not (img or _clean(inner)):
+            continue
+        e = entry(m.group(1))
+        if img and not e["preview_url"]:
+            e["preview_url"] = htmllib.unescape(img.group(1))
+        if not e["title"]:
+            e["title"] = _clean(inner, 200) or (htmllib.unescape(alt.group(1)) if alt else "")
+    for e in items.values():
+        if re.search(r" by .+$", e["title"]) and e["author"]:
+            e["title"] = e["title"][: -len(" by " + e["author"])].rstrip() if e["title"].endswith(e["author"]) else e["title"]
+        e["title"] = e["title"] or e["id"]
+
+    total = 0
+    m = re.search(r"([\d,]+)\s+entries", page)
+    if m:
+        total = int(m.group(1).replace(",", ""))
+    out = [items[i] for i in order if items[i]["preview_url"] or items[i]["title"] != i]
+    return out, total or len(out)
+
+
+def workshop_page_url(wid):
+    return f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
+
+def search_workshop(q):
+    key = (q.get("api_key") or "").strip()
+    try:
+        if key:
+            return parse_api(http_get(api_url(q, key)))
+        return parse_workshop_html(http_get(scrape_url(q)).decode("utf-8", "replace"))
+    except Exception as e:
+        msg = str(e)
+        if key:
+            msg = msg.replace(key, "***")
+        raise RuntimeError(msg) from None
+
+
+def thumb_url(u):
+    """Steam's default thumbnails are letterboxed squares; ask for a plain resize instead."""
+    if any(h in u for h in ("steamusercontent", "akamaihd", "steamstatic")):
+        return u.split("?")[0] + "?imw=480&imh=270&ima=fit"
+    return u
+
+
+def installed_map(library):
+    """workshop id -> {source} for wallpapers already downloaded in the given Steam library."""
+    out = {}
+    if not library:
+        return out
+    base = Path(library) / "steamapps" / "workshop" / "content" / WE_APPID
+    if not base.is_dir():
+        base = Path(library) / "workshop" / "content" / WE_APPID
+    for d in (sorted(base.iterdir()) if base.is_dir() else []):
+        pj = d / "project.json"
+        if not pj.is_file():
+            continue
+        try:
+            j = json.loads(pj.read_text(encoding="utf-8-sig", errors="replace"))
+        except Exception:
+            continue
+        f = str(j.get("file", ""))
+        t = str(j.get("type", "scene")).lower()
+        if f:
+            out[d.name] = f"{d}/{f}+{t}"
+    return out
+
+
+def load_cookies():
+    try:
+        return json.loads(COOKIES.read_text())
+    except Exception:
+        return {}
+
+
+def logged_in():
+    c = load_cookies()
+    return bool(c.get("steamLoginSecure") and c.get("sessionid"))
+
+
+def cmd_search(arg):
+    q = json.loads(arg if arg.lstrip().startswith('{') else base64.b64decode(arg).decode())
+    try:
+        items, total = search_workshop(q)
+    except Exception as e:
+        return {"items": [], "total": 0, "error": str(e)}
+    have = installed_map(q.get("library", ""))
+    for it in items:
+        it["thumb"] = thumb_url(it.get("preview_url", ""))
+        it["installed"] = it["id"] in have
+        it["source"] = have.get(it["id"], "")
+    return {"items": items, "total": total, "error": "", "per_page": PER_PAGE}
+
+
+def cmd_subscribe(wid):
+    if not re.fullmatch(r"\d+", wid or ""):
+        return {"ok": False, "error": "bad id"}
+    c = load_cookies()
+    if not (c.get("steamLoginSecure") and c.get("sessionid")):
+        return {"ok": False, "error": "login", "need_login": True}
+    data = urllib.parse.urlencode({"id": wid, "appid": WE_APPID, "sessionid": c["sessionid"]}).encode()
+    req = urllib.request.Request("https://steamcommunity.com/sharedfiles/subscribe", data=data, headers={
+        "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://steamcommunity.com", "Referer": f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}",
+        "Cookie": f"steamLoginSecure={c['steamLoginSecure']}; sessionid={c['sessionid']}"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            text = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {"ok": False, "error": "login", "need_login": True}
+        return {"ok": False, "error": f"Steam answered {e.code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    if re.search(r'"success"\s*:\s*(1|true)', text):
+        return {"ok": True, "error": ""}
+    return {"ok": False, "error": "Steam said no: " + text[:160], "need_login": "login" in text.lower()}
+
+
+def cmd_login():
+    try:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtWebEngineCore import QWebEngineProfile
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+        from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QVBoxLayout
+    except ImportError:
+        return {"ok": False, "error": "python-pyqt6-webengine is not installed"}
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    app = QApplication(["wallpaper-workshop"])
+    prof = QWebEngineProfile("wpworkshop")
+    prof.setPersistentStoragePath(str(DATA_DIR / "web"))
+    prof.setCachePath(str(DATA_DIR / "web" / "cache"))
+    prof.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+    got = {}
+    dlg = QDialog()
+    dlg.setWindowTitle("Sign in to Steam")
+    dlg.resize(560, 720)
+    v = QVBoxLayout(dlg)
+    v.addWidget(QLabel("Sign in with the Steam account that owns Wallpaper Engine.\n"
+                       "Your password goes straight to Steam; only the login cookie is kept on this computer."))
+    view = QWebEngineView()
+    view.setPage(QWebEnginePage(prof, view))
+    v.addWidget(view, 1)
+
+    def added(c):
+        if "steamcommunity" not in c.domain():
+            return
+        got[bytes(c.name()).decode(errors="ignore")] = bytes(c.value()).decode(errors="ignore")
+        if got.get("steamLoginSecure") and got.get("sessionid"):
+            COOKIES.write_text(json.dumps({k: got[k] for k in ("steamLoginSecure", "sessionid")}))
+            os.chmod(COOKIES, 0o600)
+            dlg.accept()
+
+    prof.cookieStore().cookieAdded.connect(added)
+    prof.cookieStore().loadAllCookies()
+    view.load(QUrl("https://steamcommunity.com/login/home/?goto=%2Fsharedfiles%2F"))
+    dlg.exec()
+    return {"ok": logged_in(), "error": "" if logged_in() else "login was cancelled"}
+
+
+def cmd_logout():
+    try:
+        COOKIES.unlink()
+    except FileNotFoundError:
+        pass
+    return {"ok": True}
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd == "search" and len(argv) > 2:
+        out = cmd_search(argv[2])
+    elif cmd == "subscribe" and len(argv) > 2:
+        out = cmd_subscribe(argv[2])
+    elif cmd == "installed":
+        out = {"installed": installed_map(argv[2] if len(argv) > 2 else "")}
+    elif cmd == "status":
+        out = {"logged_in": logged_in(), "version": __version__}
+    elif cmd == "login":
+        out = cmd_login()
+    elif cmd == "logout":
+        out = cmd_logout()
+    else:
+        out = {"error": "usage: wallpaper-workshop search|subscribe|status|login|logout"}
+    print(json.dumps(out))
+
+
+if __name__ == "__main__":
+    main(sys.argv)
