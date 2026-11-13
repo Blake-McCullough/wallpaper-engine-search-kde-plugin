@@ -23,7 +23,13 @@ if [ -z "$SRC" ]; then
 fi
 
 echo "==> Installing Qt WebEngine (only used for the Steam sign-in window)"
-sudo pacman -S --needed --noconfirm python-pyqt6 python-pyqt6-webengine
+if python3 -c "import PyQt6.QtWebEngineWidgets" 2>/dev/null; then
+  echo "    already installed"
+elif ! sudo pacman -S --needed --noconfirm python-pyqt6 python-pyqt6-webengine; then
+  echo "!! Couldn't install it from this shell (sudo is blocked here). Run in a normal terminal:"
+  echo "     sudo pacman -S --needed python-pyqt6 python-pyqt6-webengine"
+  echo "   Continuing; only the Steam sign-in needs it."
+fi
 
 echo "==> Installing helper"
 mkdir -p "$HOME/.local/bin"
