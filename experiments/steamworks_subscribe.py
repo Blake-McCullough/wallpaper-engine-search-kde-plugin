@@ -35,10 +35,19 @@ if not lib_path:
     sys.exit("No libsteam_api.so found. Pass one as the 2nd argument (copy it from any native Linux Steam game).")
 lib = ctypes.CDLL(lib_path)
 
-lib.SteamAPI_Init.restype = ctypes.c_bool
-print("SteamAPI_Init:", end=" ")
-ok = lib.SteamAPI_Init()
-print(ok)
+if hasattr(lib, "SteamAPI_InitFlat"):                 # newer SDKs (1.60+)
+    lib.SteamAPI_InitFlat.restype = ctypes.c_int
+    lib.SteamAPI_InitFlat.argtypes = [ctypes.c_char_p]
+    err = ctypes.create_string_buffer(1024)
+    res = lib.SteamAPI_InitFlat(err)
+    print("SteamAPI_InitFlat:", res, "(0 = OK)", err.value.decode(errors="replace"), flush=True)
+    ok = res == 0
+elif hasattr(lib, "SteamAPI_Init"):                   # older SDKs
+    lib.SteamAPI_Init.restype = ctypes.c_bool
+    ok = lib.SteamAPI_Init()
+    print("SteamAPI_Init:", ok, flush=True)
+else:
+    sys.exit("This libsteam_api.so exports neither SteamAPI_InitFlat nor SteamAPI_Init.")
 if not ok:
     sys.exit("Init failed: is Steam running and signed in? (Flatpak Steam can't be reached from outside its sandbox.)")
 
